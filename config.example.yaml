@@ -1,0 +1,18 @@
+webhook:
+  url: https://your-app.example.com/hooks/mail
+  method: POST
+  headers:
+    Authorization: Bearer your-secret-token
+
+accounts:
+  - email: support@example.com
+    password: your-imap-password
+    host: imap.example.com
+    port: 993
+    security: SSL   # SSL (IMAPS), TLS (STARTTLS), or NONE
+
+  - email: info@example.com
+    password: your-imap-password
+    host: imap.example.com
+    port: 993
+    security: SSL

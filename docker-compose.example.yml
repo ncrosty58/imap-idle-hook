@@ -1,0 +1,24 @@
+services:
+  imap-idle-hook:
+    image: ghcr.io/ncrosty58/imap-idle-hook:latest
+    restart: unless-stopped
+
+    # Option A: configure via environment variables
+    environment:
+      WEBHOOK_URL: https://your-app.example.com/hooks/mail
+      # WEBHOOK_METHOD: POST                        # default: POST
+      # WEBHOOK_HEADERS: '{"Authorization":"Bearer secret"}'
+
+      ACCOUNT_1_EMAIL: support@example.com
+      ACCOUNT_1_PASSWORD: your-imap-password
+      ACCOUNT_1_HOST: imap.example.com
+      # ACCOUNT_1_PORT: 993                         # default: 993
+      # ACCOUNT_1_SECURITY: SSL                     # default: SSL
+
+      # ACCOUNT_2_EMAIL: info@example.com
+      # ACCOUNT_2_PASSWORD: your-imap-password
+      # ACCOUNT_2_HOST: imap.example.com
+
+    # Option B: mount a config file instead
+    # volumes:
+    #   - ./accounts.yaml:/config/accounts.yaml:ro
