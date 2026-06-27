@@ -5,8 +5,8 @@ RUN apt-get update \
  && pip3 install imapclient requests pyyaml --break-system-packages \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-COPY ../watcher.py /opt/watcher.py
-COPY discover_accounts.php /opt/discover_accounts.php
+COPY watcher.py /opt/watcher.py
+COPY espocrm/discover_accounts.php /opt/discover_accounts.php
 
 # Discover accounts from EspoCRM's database and trigger cron.php on new mail.
 # Both can be overridden at runtime if needed.
