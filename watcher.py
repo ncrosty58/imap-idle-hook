@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """
-imap-idle-hook: fires a webhook when new mail arrives via IMAP IDLE.
-Configure via /config/accounts.yaml or ACCOUNT_N_* environment variables.
+imap-idle-hook: fires an action when new mail arrives via IMAP IDLE.
+
+Account sources (in priority order):
+  1. ACCOUNTS_CMD  — command whose stdout is a JSON array of accounts
+  2. /config/accounts.yaml (or CONFIG_FILE)
+  3. ACCOUNT_N_* environment variables
+
+Actions on new mail (both can be set simultaneously):
+  - WEBHOOK_URL / webhook.url  — HTTP POST with JSON payload
+  - ON_NEW_MAIL_CMD            — shell command to run
 """
 import json
 import logging
 import os
+import shlex
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -23,9 +33,12 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 CONFIG_FILE     = os.environ.get('CONFIG_FILE', '/config/accounts.yaml')
+ACCOUNTS_CMD    = os.environ.get('ACCOUNTS_CMD', '')
+ON_NEW_MAIL_CMD = os.environ.get('ON_NEW_MAIL_CMD', '')
 IDLE_REFRESH    = 20 * 60   # restart IDLE every 20 min (RFC 2177 limit ~29 min)
 RECONNECT_DELAY = 30        # seconds before reconnecting after error
 IDLE_CHECK      = 30        # poll interval — keeps stop-event responsive
+RELOAD_INTERVAL = 10 * 60   # re-run ACCOUNTS_CMD to pick up new accounts
 
 
 def load_config() -> dict:
@@ -38,25 +51,39 @@ def load_config() -> dict:
 
 
 def load_accounts() -> list[dict]:
-    cfg = load_config()
+    if ACCOUNTS_CMD:
+        try:
+            result = subprocess.run(
+                shlex.split(ACCOUNTS_CMD),
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                log.error('ACCOUNTS_CMD failed: %s', result.stderr.decode(errors='replace').strip())
+                return []
+            accounts = json.loads(result.stdout)
+            log.info('ACCOUNTS_CMD returned %d accounts: %s', len(accounts), [a['email'] for a in accounts])
+            return accounts
+        except Exception as e:
+            log.error('ACCOUNTS_CMD exception: %s', e)
+            return []
 
+    cfg = load_config()
     if 'accounts' in cfg:
         return cfg['accounts']
 
-    # Fall back to ACCOUNT_N_* env vars
     accounts = []
     i = 1
     while True:
-        prefix = f'ACCOUNT_{i}_'
-        email = os.environ.get(f'{prefix}EMAIL')
+        email = os.environ.get(f'ACCOUNT_{i}_EMAIL')
         if not email:
             break
         accounts.append({
             'email':    email,
-            'password': os.environ.get(f'{prefix}PASSWORD', ''),
-            'host':     os.environ.get(f'{prefix}HOST', ''),
-            'port':     int(os.environ.get(f'{prefix}PORT', 993)),
-            'security': os.environ.get(f'{prefix}SECURITY', 'SSL').upper(),
+            'password': os.environ.get(f'ACCOUNT_{i}_PASSWORD', ''),
+            'host':     os.environ.get(f'ACCOUNT_{i}_HOST', ''),
+            'port':     int(os.environ.get(f'ACCOUNT_{i}_PORT', 993)),
+            'security': os.environ.get(f'ACCOUNT_{i}_SECURITY', 'SSL').upper(),
         })
         i += 1
 
@@ -66,46 +93,53 @@ def load_accounts() -> list[dict]:
 def load_webhook() -> dict:
     cfg = load_config()
     webhook = cfg.get('webhook', {})
-
-    # env vars override config file
-    url = os.environ.get('WEBHOOK_URL') or webhook.get('url', '')
-    method = os.environ.get('WEBHOOK_METHOD') or webhook.get('method', 'POST')
-
+    url     = os.environ.get('WEBHOOK_URL') or webhook.get('url', '')
+    method  = os.environ.get('WEBHOOK_METHOD') or webhook.get('method', 'POST')
     headers = webhook.get('headers', {})
     if env_headers := os.environ.get('WEBHOOK_HEADERS'):
         try:
             headers.update(json.loads(env_headers))
         except json.JSONDecodeError:
             log.warning('WEBHOOK_HEADERS is not valid JSON, ignoring')
-
     return {'url': url, 'method': method.upper(), 'headers': headers}
 
 
-def fire_webhook(webhook: dict, email: str, folder: str) -> None:
-    url = webhook['url']
-    if not url:
-        log.warning('no WEBHOOK_URL configured, skipping')
-        return
+def on_new_mail(webhook: dict, email: str, folder: str) -> None:
+    if webhook['url']:
+        payload = {
+            'event':     'new_mail',
+            'email':     email,
+            'folder':    folder,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            resp = requests.request(
+                method=webhook['method'],
+                url=webhook['url'],
+                json=payload,
+                headers=webhook['headers'],
+                timeout=15,
+            )
+            resp.raise_for_status()
+            log.info('%s: webhook → %s %s', email, resp.status_code, webhook['url'])
+        except requests.RequestException as e:
+            log.error('%s: webhook failed: %s', email, e)
 
-    payload = {
-        'event':     'new_mail',
-        'email':     email,
-        'folder':    folder,
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-    }
-
-    try:
-        resp = requests.request(
-            method=webhook['method'],
-            url=url,
-            json=payload,
-            headers=webhook['headers'],
-            timeout=15,
-        )
-        resp.raise_for_status()
-        log.info('%s: webhook fired → %s %s', email, resp.status_code, url)
-    except requests.RequestException as e:
-        log.error('%s: webhook failed: %s', email, e)
+    if ON_NEW_MAIL_CMD:
+        try:
+            result = subprocess.run(
+                shlex.split(ON_NEW_MAIL_CMD),
+                capture_output=True,
+                timeout=60,
+                env={**os.environ, 'IMAP_EMAIL': email, 'IMAP_FOLDER': folder},
+            )
+            if result.returncode != 0:
+                log.warning('%s: ON_NEW_MAIL_CMD stderr: %s', email,
+                            result.stderr.decode(errors='replace').strip())
+            else:
+                log.info('%s: ON_NEW_MAIL_CMD done', email)
+        except Exception as e:
+            log.error('%s: ON_NEW_MAIL_CMD failed: %s', email, e)
 
 
 def watch(account: dict, webhook: dict, stop: threading.Event) -> None:
@@ -136,7 +170,7 @@ def watch(account: dict, webhook: dict, stop: threading.Event) -> None:
                     if any(len(r) >= 2 and r[1] == b'EXISTS' for r in responses):
                         log.info('%s: new mail in INBOX', email)
                         threading.Thread(
-                            target=fire_webhook,
+                            target=on_new_mail,
                             args=(webhook, email, 'INBOX'),
                             daemon=True,
                         ).start()
@@ -152,31 +186,49 @@ def watch(account: dict, webhook: dict, stop: threading.Event) -> None:
 
 
 def main() -> None:
-    accounts = load_accounts()
-    if not accounts:
-        log.error('no accounts configured — set ACCOUNT_1_EMAIL/PASSWORD/HOST or mount /config/accounts.yaml')
-        raise SystemExit(1)
-
     webhook = load_webhook()
-    if not webhook['url']:
-        log.warning('no webhook URL configured — new mail will be logged but not forwarded')
+    if not webhook['url'] and not ON_NEW_MAIL_CMD:
+        log.warning('no WEBHOOK_URL or ON_NEW_MAIL_CMD set — new mail will only be logged')
 
-    log.info('starting watchers for %d accounts', len(accounts))
+    active: dict[str, tuple[threading.Thread, threading.Event]] = {}
 
-    threads = []
-    for account in accounts:
-        stop = threading.Event()
-        t = threading.Thread(
-            target=watch,
-            args=(account, webhook, stop),
-            daemon=True,
-            name=account['email'],
-        )
-        t.start()
-        threads.append((t, stop))
+    while True:
+        accounts     = load_accounts()
+        current_keys = {a['email'] for a in accounts}
 
-    for t, _ in threads:
-        t.join()
+        if not active and not accounts:
+            log.error('no accounts configured — set ACCOUNTS_CMD, ACCOUNT_1_EMAIL/PASSWORD/HOST, or mount /config/accounts.yaml')
+            raise SystemExit(1)
+
+        for email in list(active):
+            if email not in current_keys:
+                log.info('%s: no longer in account list, stopping', email)
+                _, stop = active.pop(email)
+                stop.set()
+
+        for account in accounts:
+            email = account['email']
+            if email in active and active[email][0].is_alive():
+                continue
+            if email in active:
+                log.info('%s: thread died, restarting', email)
+                active.pop(email)[1].set()
+            stop = threading.Event()
+            t = threading.Thread(
+                target=watch,
+                args=(account, webhook, stop),
+                daemon=True,
+                name=email,
+            )
+            t.start()
+            active[email] = (t, stop)
+
+        # Only reload periodically if using a dynamic account source
+        if ACCOUNTS_CMD:
+            time.sleep(RELOAD_INTERVAL)
+        else:
+            # Static config — just keep main thread alive
+            threading.Event().wait()
 
 
 if __name__ == '__main__':

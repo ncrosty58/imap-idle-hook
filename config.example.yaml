@@ -4,6 +4,8 @@ webhook:
   headers:
     Authorization: Bearer your-secret-token
 
+# on_new_mail_cmd: /usr/local/bin/my-script.sh   # run a command instead of (or alongside) the webhook
+
 accounts:
   - email: support@example.com
     password: your-imap-password

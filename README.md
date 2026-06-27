@@ -93,6 +93,21 @@ Set `CONFIG_FILE` to override the default config path (`/config/accounts.yaml`).
 
 One thread per mailbox. Each thread connects, selects INBOX, and enters IMAP IDLE. The server pushes an `EXISTS` response when mail arrives; the thread fires the webhook and re-enters IDLE. IDLE is restarted every 20 minutes to comply with RFC 2177's recommended limit. On connection failure the thread reconnects after 30 seconds.
 
+## EspoCRM
+
+A ready-made EspoCRM sidecar lives in [`espocrm/`](./espocrm/). It extends this image with automatic account discovery from EspoCRM's database and triggers `cron.php` directly instead of a webhook — no configuration needed beyond sharing the EspoCRM volume.
+
+```yaml
+services:
+  espocrm-imap-watcher:
+    image: ghcr.io/ncrosty58/imap-idle-hook:espocrm
+    restart: unless-stopped
+    volumes:
+      - espocrm_html:/var/www/html
+```
+
+See [`espocrm/README.md`](./espocrm/README.md) for full setup instructions.
+
 ## License
 
 MIT
